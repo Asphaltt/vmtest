@@ -18,7 +18,7 @@ use std::time;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
-use log::{debug, log_enabled, warn, Level};
+use log::{debug, info, log_enabled, warn, Level};
 use qapi::{qga, qmp, Qmp};
 use rand::Rng;
 use serde_derive::Serialize;
@@ -749,6 +749,55 @@ impl Qemu {
         Ok(qemu)
     }
 
+    /// Render the qemu command line for logging and diagnostics
+    fn qemu_cmdline(&self) -> String {
+        let args = self
+            .process
+            .get_args()
+            .map(|a| format!("\"{}\"", a.to_string_lossy()))
+            .join(" ");
+        let program = self.process.get_program().to_string_lossy();
+
+        if args.is_empty() {
+            program.to_string()
+        } else {
+            format!("{program} {args}")
+        }
+    }
+
+    /// Emit the full qemu command line to logs and UI with manual wrapping
+    fn emit_qemu_cmdline(&self) {
+        const CMDLINE_WRAP: usize = 100;
+
+        let cmdline = self.qemu_cmdline();
+        info!("qemu invocation: {cmdline}");
+
+        let prefix = "qemu invocation: ";
+        let mut line = prefix.to_string();
+        for token in cmdline.split_whitespace() {
+            let spacer = if line.trim_end().len() > prefix.len() {
+                1
+            } else {
+                0
+            };
+            if line.len() + spacer + token.len() + 2 <= CMDLINE_WRAP {
+                if spacer == 1 {
+                    line.push(' ');
+                }
+                line.push_str(token);
+            } else {
+                line.push_str(" \\");
+                let _ = self.updates.send(Output::Boot(line));
+                line = " ".repeat(prefix.len());
+                line.push_str(token);
+            }
+        }
+
+        if line.trim().len() > prefix.len() {
+            let _ = self.updates.send(Output::Boot(line));
+        }
+    }
+
     /// Return whether or not this target is ran in interactive mode
     ///
     /// Interactive mode means we are not running a command and we are not
@@ -1035,6 +1084,11 @@ impl Qemu {
         Qmp<QmpUnixStream>,
     )> {
         let _ = self.updates.send(Output::BootStart);
+
+        if log_enabled!(Level::Debug) {
+            self.emit_qemu_cmdline();
+        }
+
         let mut child = match self.process.spawn() {
             Ok(c) => c,
             Err(e) => {
